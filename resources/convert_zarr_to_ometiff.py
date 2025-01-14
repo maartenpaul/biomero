@@ -165,7 +165,7 @@ def convert_zarr_to_tiff(zarr_file_path, key=None, output_file=None):
             logger.info(f"Original data shape: {dask_image_data.shape}")
 
             if output_file is None:
-                output_file = os.path.splitext(zarr_file_path)[0] + f".{key}.ome.tiff"
+                output_file = os.path.splitext(zarr_file_path)[0] + f".{key}.ome.tif"
 
             # Create metadata with actual dimension order
             metadata = {'axes': ''.join(dim.upper() for dim in dim_order)}
