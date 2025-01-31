@@ -4,7 +4,7 @@
 #SBATCH -n 1
 #SBATCH -N 1
 #SBATCH --time=00:20:00
-#SBATCH --partition=testing
+#SBATCH --partition=cpu-short
 
 # Log important values
 echo "Job Parameters:"
