@@ -309,7 +309,8 @@ class SlurmClient(Connection):
                  enable_workflow_analytics: bool = True,
                  sqlalchemy_url: str = None,
                  config_only: bool = False,
-                 slurm_data_bind_path: str = None):
+                 slurm_data_bind_path: str = None,
+                 slurm_conversion_partition: str = None):
         """
         Initializes a new instance of the SlurmClient class.
 
@@ -420,6 +421,7 @@ class SlurmClient(Connection):
         self.slurm_model_jobs = slurm_model_jobs
         self.slurm_model_jobs_params = slurm_model_jobs_params
         self.slurm_data_bind_path = slurm_data_bind_path
+        self.slurm_conversion_partition = slurm_conversion_partition
 
         # Init cache. Keep responses for 360 seconds
         self.cache = requests_cache.backends.sqlite.SQLiteCache(
@@ -939,7 +941,9 @@ class SlurmClient(Connection):
         slurm_data_bind_path = configs.get(
             "SLURM", "slurm_data_bind_path",
             fallback= None)
-
+        slurm_conversion_partition = configs.get(
+            "SLURM", "slurm_conversion_partition",
+            fallback= None)
 
         # Split the MODELS into paths, repos and images
         models_dict = dict(configs.items("MODELS"))
@@ -1020,7 +1024,8 @@ class SlurmClient(Connection):
                    enable_workflow_analytics=enable_workflow_analytics,
                    sqlalchemy_url=sqlalchemy_url,
                    config_only=config_only,
-                   slurm_data_bind_path=slurm_data_bind_path)
+                   slurm_data_bind_path=slurm_data_bind_path,
+                   slurm_conversion_partition=slurm_conversion_partition)
 
     def cleanup_tmp_files(self,
                           slurm_job_id: str,
@@ -2118,8 +2123,10 @@ class SlurmClient(Connection):
             "CONVERTER_IMAGE": chosen_converter,
             "SCRIPT_PATH": f"\"{self.slurm_script_path}\"",
             "CONFIG_FILE": f"\"{config_file}\"",
-            "APPTAINER_BINDPATH" : f"\"{self.slurm_data_bind_path}\"",
+            "APPTAINER_BINDPATH" : f"\"{self.slurm_data_bind_path}\""
         }
+        if self.slurm_conversion_partition is not None:
+            sbatch_env["CONVERSION_PARTITION"] = f"\"{self.slurm_conversion_partition}\""
 
         conversion_cmd = "sbatch --job-name=conversion --export=ALL,CONFIG_PATH=\"$PWD/$CONFIG_FILE\" --array=1-$N \"$SCRIPT_PATH/convert_job_array.sh\""
         # conversion_cmd_waiting = "sbatch --job-name=conversion --export=ALL,CONFIG_PATH=\"$PWD/$CONFIG_FILE\" --array=1-$N --wait $SCRIPT_PATH/convert_job_array.sh"
