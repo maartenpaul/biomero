@@ -2063,8 +2063,9 @@ class SlurmClient(Connection):
             "IMAGE_VERSION": f"{workflow_version}",
             "SINGULARITY_IMAGE": f"\"{image}_{workflow_version}.sif\"",
             "SCRIPT_PATH": f"\"{self.slurm_script_path}\"",
-            "APPTAINER_BINDPATH" : f"\"{self.slurm_data_bind_path}\"",
         }
+        if self.slurm_data_bind_path is not None:
+            sbatch_env["APPTAINER_BINDPATH"] = f"\"{self.slurm_data_bind_path}\""
         workflow_env = self.workflow_params_to_envvars(**kwargs)
         env = {**sbatch_env, **workflow_env}
 
@@ -2125,8 +2126,9 @@ class SlurmClient(Connection):
             "CONVERTER_IMAGE": chosen_converter,
             "SCRIPT_PATH": f"\"{self.slurm_script_path}\"",
             "CONFIG_FILE": f"\"{config_file}\"",
-            "APPTAINER_BINDPATH" : f"\"{self.slurm_data_bind_path}\""
         }
+        if self.slurm_data_bind_path is not None:
+            sbatch_env["APPTAINER_BINDPATH"] = f"\"{self.slurm_data_bind_path}\""
         if self.slurm_conversion_partition is not None:
             sbatch_env["CONVERSION_PARTITION"] = f"\"{self.slurm_conversion_partition}\""
 
