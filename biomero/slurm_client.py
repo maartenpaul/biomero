@@ -254,7 +254,8 @@ class SlurmClient(Connection):
 
     """
     _DEFAULT_CONFIG_PATH_1 = "/etc/slurm-config.ini"
-    _DEFAULT_CONFIG_PATH_2 = "~/slurm-config.ini"
+    _DEFAULT_CONFIG_PATH_2 = "/OMERO/slurm-config.ini"
+    _DEFAULT_CONFIG_PATH_3 = "~/slurm-config.ini"
     _DEFAULT_HOST = "slurm"
     _DEFAULT_INLINE_SSH_ENV = True
     _DEFAULT_SLURM_DATA_PATH = "my-scratch/data"
@@ -921,9 +922,10 @@ class SlurmClient(Connection):
         # Load the configuration file
         configs = configparser.ConfigParser(allow_no_value=True)
         # Loads from default locations and given location, missing files are ok
-        configs.read([cls._DEFAULT_CONFIG_PATH_1,
-                     cls._DEFAULT_CONFIG_PATH_2,
-                     configfile])
+        configs.read([os.path.expanduser(cls._DEFAULT_CONFIG_PATH_1),
+                     os.path.expanduser(cls._DEFAULT_CONFIG_PATH_2),
+                     os.path.expanduser(cls._DEFAULT_CONFIG_PATH_3),
+                     os.path.expanduser(configfile)])
         
         # Read the required parameters from the configuration file,
         # fallback to defaults
