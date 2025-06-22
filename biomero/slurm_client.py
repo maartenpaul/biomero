@@ -2101,10 +2101,16 @@ class SlurmClient(Connection):
         }
         if self.slurm_data_bind_path is not None:
             sbatch_env["APPTAINER_BINDPATH"] = f"\"{self.slurm_data_bind_path}\""
+        
+        # Build the base sbatch command
+        conversion_cmd = "sbatch --job-name=conversion --export=ALL,CONFIG_PATH=\"$PWD/$CONFIG_FILE\""
+        
+        # Add partition if specified
         if self.slurm_conversion_partition is not None:
-            sbatch_env["CONVERSION_PARTITION"] = f"\"{self.slurm_conversion_partition}\""
-
-        conversion_cmd = "sbatch --job-name=conversion --export=ALL,CONFIG_PATH=\"$PWD/$CONFIG_FILE\" --array=1-$N \"$SCRIPT_PATH/convert_job_array.sh\""
+            conversion_cmd += f" --partition={self.slurm_conversion_partition}"
+        
+        # Complete the command
+        conversion_cmd += " --array=1-$N \"$SCRIPT_PATH/convert_job_array.sh\""
         # conversion_cmd_waiting = "sbatch --job-name=conversion --export=ALL,CONFIG_PATH=\"$PWD/$CONFIG_FILE\" --array=1-$N --wait $SCRIPT_PATH/convert_job_array.sh"
 
         return conversion_cmd, sbatch_env, chosen_converter, version
