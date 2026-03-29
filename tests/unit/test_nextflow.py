@@ -119,8 +119,9 @@ class TestGetNextflowCommand:
     def test_builds_sbatch_command(self, slurm_client):
         slurm_client.slurm_script_path = "my-scratch/slurm-scripts"
 
-        cmd, env, complex_params = slurm_client.get_nextflow_command(
-            "incucyte", dataset_id=701, max_images=10)
+        cmd, env, complex_params, full_path = \
+            slurm_client.get_nextflow_command(
+                "incucyte", dataset_id=701, max_images=10)
 
         assert "sbatch" in cmd
         assert "nextflow_job_template.sh" in cmd
@@ -134,12 +135,13 @@ class TestGetNextflowCommand:
         assert "--dataset_id 701" in env["NF_PARAMS"]
         assert "--max_images 10" in env["NF_PARAMS"]
         assert complex_params == {}
+        assert full_path == "my-scratch/nextflow-pipelines/incucyte-analysis"
 
     def test_separates_complex_params(self, slurm_client):
         slurm_client.slurm_script_path = "my-scratch/slurm-scripts"
 
         channels = [{"channel_index": 0, "channel_name": "GFP"}]
-        cmd, env, complex_params = slurm_client.get_nextflow_command(
+        cmd, env, complex_params, _ = slurm_client.get_nextflow_command(
             "incucyte", dataset_id=701, stardist_channels=channels)
 
         assert "stardist_channels" in complex_params
@@ -151,7 +153,7 @@ class TestGetNextflowCommand:
     def test_bool_params_lowercase(self, slurm_client):
         slurm_client.slurm_script_path = "my-scratch/slurm-scripts"
 
-        cmd, env, _ = slurm_client.get_nextflow_command(
+        cmd, env, _, _path = slurm_client.get_nextflow_command(
             "incucyte", upload_to_omero=True)
 
         assert "--upload_to_omero true" in env["NF_PARAMS"]
@@ -164,7 +166,7 @@ class TestPullNextflowSchema:
 
     def test_raises_for_non_github_url(self, slurm_client):
         slurm_client.nextflow_repos["test"] = "https://gitlab.com/foo/bar"
-        with pytest.raises(ValueError, match="GitHub"):
+        with pytest.raises(ValueError, match="Invalid GitHub URL"):
             slurm_client.pull_nextflow_schema("test")
 
     @patch.object(SlurmClient, 'get_or_create_github_session')
@@ -188,7 +190,9 @@ class TestRunNextflowPipeline:
     @patch.object(SlurmClient, 'get_nextflow_command')
     def test_submits_pipeline(self, mock_cmd, mock_run, mock_extract,
                               slurm_client):
-        mock_cmd.return_value = ("sbatch ...", {"NF_PIPELINE": "x"}, {})
+        mock_cmd.return_value = (
+            "sbatch ...", {"NF_PIPELINE": "x"}, {},
+            "my-scratch/nextflow-pipelines/incucyte-analysis")
         mock_result = MagicMock()
         mock_result.ok = True
         mock_run.return_value = mock_result

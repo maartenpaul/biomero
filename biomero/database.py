@@ -120,7 +120,7 @@ def retry_on_database_conflict(max_retries=10, base_delay=0.1, max_delay=5.0):
                         # Rollback current transaction
                         try:
                             EngineManager.rollback()
-                        except:
+                        except Exception:
                             pass
                     else:
                         # Not a retryable error

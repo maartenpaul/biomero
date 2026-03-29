@@ -29,6 +29,7 @@ import time as timesleep
 from string import Template
 from importlib_resources import files
 import io
+import json
 import os
 from biomero.eventsourcing import WorkflowTracker, NoOpWorkflowTracker
 from biomero.views import JobAccounting, JobProgress, WorkflowAnalytics, WorkflowProgress
@@ -2276,20 +2277,12 @@ class SlurmClient(Connection):
         repo_url = self.nextflow_repos[pipeline.lower()]
         revision = self.nextflow_revisions.get(pipeline.lower(), "main")
 
-        # Parse GitHub URL to build raw content URL
-        url_parts = repo_url.rstrip('/').split('/')
-        if 'github.com' not in repo_url:
-            raise ValueError(f"Only GitHub URLs are supported: {repo_url}")
-
-        # Extract owner/repo, handle tree/branch in URL
+        # Reuse existing URL parser to extract owner/repo/branch
+        url_parts, branch = self.extract_parts_from_url(repo_url)
+        owner = url_parts[3]
+        repo = url_parts[4]
         if 'tree' in url_parts:
-            tree_idx = url_parts.index('tree')
-            owner = url_parts[tree_idx - 2]
-            repo = url_parts[tree_idx - 1]
-            revision = url_parts[tree_idx + 1]
-        else:
-            owner = url_parts[-2]
-            repo = url_parts[-1]
+            revision = branch
 
         raw_url = (f"https://raw.githubusercontent.com/"
                    f"{owner}/{repo}/{revision}/nextflow_schema.json")
@@ -2341,7 +2334,7 @@ class SlurmClient(Connection):
 
     def get_nextflow_command(
             self, pipeline: str, **kwargs
-    ) -> Tuple[str, Dict]:
+    ) -> Tuple[str, Dict, Dict, str]:
         """Generate sbatch command wrapping a Nextflow pipeline run.
 
         Args:
@@ -2349,8 +2342,9 @@ class SlurmClient(Connection):
             **kwargs: Pipeline parameters to pass as CLI arguments.
 
         Returns:
-            Tuple[str, Dict]: The sbatch command string and
-                environment variables dict.
+            Tuple[str, Dict, Dict, str]: The sbatch command string,
+                environment variables dict, complex params dict,
+                and the resolved pipeline path on the cluster.
         """
         pipeline_key = pipeline.lower()
         pipeline_path = self.nextflow_pipelines.get(pipeline_key, pipeline_key)
@@ -2396,7 +2390,7 @@ class SlurmClient(Connection):
             f"sbatch{job_param_str} --output=omero-%j.log "
             f"\"{self.slurm_script_path}/nextflow_job_template.sh\"")
 
-        return sbatch_cmd, sbatch_env, complex_params
+        return sbatch_cmd, sbatch_env, complex_params, full_pipeline_path
 
     def run_nextflow_pipeline(
             self, pipeline_name: str,
@@ -2439,19 +2433,13 @@ class SlurmClient(Connection):
             f"Added Nextflow task {task_id} to workflow {wf_id}")
 
         # Build the command
-        sbatch_cmd, sbatch_env, complex_params = \
+        sbatch_cmd, sbatch_env, complex_params, full_pipeline_path = \
             self.get_nextflow_command(pipeline_name, **kwargs)
 
         pipeline_key = pipeline_name.lower()
-        pipeline_path = self.nextflow_pipelines.get(
-            pipeline_key, pipeline_key)
-        full_pipeline_path = (
-            f"{self.nextflow_pipelines_path}/{pipeline_path}"
-            if self.nextflow_pipelines_path else pipeline_path)
 
         # Write complex params as JSON file if needed
         if complex_params:
-            import json
             params_json = json.dumps(complex_params, indent=2)
             params_file = f"params_{pipeline_key}.json"
             remote_path = f"{full_pipeline_path}/{params_file}"
@@ -2475,10 +2463,9 @@ class SlurmClient(Connection):
                      remote=creds_path)
             logger.info("Wrote OMERO credentials config")
 
-        print(f"Running Nextflow pipeline {pipeline_name} on Slurm: "
-              f"{sbatch_cmd}")
         logger.info(
-            f"Running Nextflow pipeline {pipeline_name} on Slurm")
+            f"Running Nextflow pipeline {pipeline_name} on Slurm: "
+            f"{sbatch_cmd}")
         res = self.run_commands([sbatch_cmd], sbatch_env)
         slurm_job_id = self.extract_job_id(res)
 
@@ -2517,12 +2504,9 @@ class SlurmClient(Connection):
             revision = self.nextflow_revisions.get(name, "main")
             full_path = f"{self.nextflow_pipelines_path}/{path}"
 
-            # Parse repo URL (remove /tree/branch if present)
-            clean_url = repo_url
-            if '/tree/' in clean_url:
-                clean_url = clean_url.split('/tree/')[0]
-            if not clean_url.endswith('.git'):
-                clean_url = clean_url + '.git'
+            # Parse repo URL using existing helper
+            url_parts, _ = self.extract_parts_from_url(repo_url)
+            clean_url = f"https://github.com/{url_parts[3]}/{url_parts[4]}.git"
 
             # Clone or pull
             clone_cmd = (
