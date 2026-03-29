@@ -311,7 +311,17 @@ class SlurmClient(Connection):
                  sqlalchemy_url: str = None,
                  config_only: bool = False,
                  slurm_data_bind_path: str = None,
-                 slurm_conversion_partition: str = None):
+                 slurm_conversion_partition: str = None,
+                 # Nextflow pipeline support
+                 nextflow_module: str = None,
+                 nextflow_pipelines_path: str = None,
+                 nextflow_default_profile: str = None,
+                 nextflow_work_path: str = None,
+                 nextflow_pipelines: dict = None,
+                 nextflow_repos: dict = None,
+                 nextflow_revisions: dict = None,
+                 nextflow_entries: dict = None,
+                 nextflow_job_params: dict = None):
         """
         Initializes a new instance of the SlurmClient class.
 
@@ -435,6 +445,17 @@ class SlurmClient(Connection):
         self.slurm_model_jobs_params = slurm_model_jobs_params
         self.slurm_data_bind_path = slurm_data_bind_path
         self.slurm_conversion_partition = slurm_conversion_partition
+
+        # Nextflow pipeline support
+        self.nextflow_module = nextflow_module
+        self.nextflow_pipelines_path = nextflow_pipelines_path
+        self.nextflow_default_profile = nextflow_default_profile or "singularity,slurm"
+        self.nextflow_work_path = nextflow_work_path
+        self.nextflow_pipelines = nextflow_pipelines or {}
+        self.nextflow_repos = nextflow_repos or {}
+        self.nextflow_revisions = nextflow_revisions or {}
+        self.nextflow_entries = nextflow_entries or {}
+        self.nextflow_job_params = nextflow_job_params or {}
 
         # Init cache. Keep responses for 360 seconds
         self.cache = requests_cache.backends.sqlite.SQLiteCache(
@@ -994,6 +1015,56 @@ class SlurmClient(Connection):
             enable_workflow_analytics = True
             sqlalchemy_url = None
         
+        # Parse [NEXTFLOW] section, if available
+        try:
+            nextflow_module = configs.get(
+                "NEXTFLOW", "nextflow_module", fallback="nextflow")
+            nextflow_pipelines_path = configs.get(
+                "NEXTFLOW", "nextflow_pipelines_path", fallback=None)
+            nextflow_default_profile = configs.get(
+                "NEXTFLOW", "nextflow_default_profile",
+                fallback="singularity,slurm")
+            nextflow_work_path = configs.get(
+                "NEXTFLOW", "nextflow_work_path", fallback=None)
+        except configparser.NoSectionError:
+            nextflow_module = None
+            nextflow_pipelines_path = None
+            nextflow_default_profile = None
+            nextflow_work_path = None
+
+        # Parse [NEXTFLOW_PIPELINES] using same suffix pattern as [MODELS]
+        nextflow_pipelines = {}
+        nextflow_repos = {}
+        nextflow_revisions = {}
+        nextflow_entries = {}
+        nextflow_job_params = {}
+        try:
+            nf_dict = dict(configs.items("NEXTFLOW_PIPELINES"))
+            for k, v in nf_dict.items():
+                suffix_repo = '_repo'
+                suffix_revision = '_revision'
+                suffix_entry = '_entry'
+                nf_job_param_pattern = "(.+)_job_(.+)"
+                nf_job_param_match = re.match(nf_job_param_pattern, k)
+                if k.endswith(suffix_repo):
+                    nextflow_repos[k[:-len(suffix_repo)]] = v
+                elif k.endswith(suffix_revision):
+                    nextflow_revisions[k[:-len(suffix_revision)]] = v
+                elif k.endswith(suffix_entry):
+                    nextflow_entries[k[:-len(suffix_entry)]] = v
+                elif nf_job_param_match:
+                    name = nf_job_param_match.group(1)
+                    if name not in nextflow_job_params:
+                        nextflow_job_params[name] = []
+                    nextflow_job_params[name].append(
+                        f" --{nf_job_param_match.group(2)}={v}")
+                else:
+                    nextflow_pipelines[k] = v
+            logger.info(f"Configured Nextflow pipelines: "
+                        f"{list(nextflow_pipelines.keys())}")
+        except configparser.NoSectionError:
+            pass  # No Nextflow pipelines configured
+
         # Create the SlurmClient object with the parameters read from
         # the config file
         return cls(host=host,
@@ -1018,7 +1089,17 @@ class SlurmClient(Connection):
                    sqlalchemy_url=sqlalchemy_url,
                    config_only=config_only,
                    slurm_data_bind_path=slurm_data_bind_path,
-                   slurm_conversion_partition=slurm_conversion_partition)
+                   slurm_conversion_partition=slurm_conversion_partition,
+                   # Nextflow settings
+                   nextflow_module=nextflow_module,
+                   nextflow_pipelines_path=nextflow_pipelines_path,
+                   nextflow_default_profile=nextflow_default_profile,
+                   nextflow_work_path=nextflow_work_path,
+                   nextflow_pipelines=nextflow_pipelines,
+                   nextflow_repos=nextflow_repos,
+                   nextflow_revisions=nextflow_revisions,
+                   nextflow_entries=nextflow_entries,
+                   nextflow_job_params=nextflow_job_params)
 
     def cleanup_tmp_files(self,
                           slurm_job_id: str,
@@ -2159,6 +2240,310 @@ class SlurmClient(Connection):
                    for key, value in kwargs.items()}
         logger.debug(workflow_env)
         return workflow_env
+
+    # ----------------------------------------------------------------
+    # Nextflow Pipeline Support
+    # ----------------------------------------------------------------
+
+    def list_nextflow_pipelines(self) -> List[str]:
+        """Return names of configured Nextflow pipelines.
+
+        Returns:
+            List[str]: List of pipeline names from the
+                [NEXTFLOW_PIPELINES] config section.
+        """
+        return list(self.nextflow_pipelines.keys())
+
+    def pull_nextflow_schema(self, pipeline: str) -> Dict:
+        """Fetch nextflow_schema.json from the pipeline's GitHub repo.
+
+        Args:
+            pipeline (str): The pipeline name as configured in
+                [NEXTFLOW_PIPELINES].
+
+        Returns:
+            Dict: The parsed JSON Schema from nextflow_schema.json.
+
+        Raises:
+            ValueError: If the pipeline is not configured or the
+                schema cannot be fetched.
+        """
+        if pipeline.lower() not in self.nextflow_repos:
+            raise ValueError(
+                f"Nextflow pipeline '{pipeline}' not configured. "
+                f"Available: {list(self.nextflow_repos.keys())}")
+
+        repo_url = self.nextflow_repos[pipeline.lower()]
+        revision = self.nextflow_revisions.get(pipeline.lower(), "main")
+
+        # Parse GitHub URL to build raw content URL
+        url_parts = repo_url.rstrip('/').split('/')
+        if 'github.com' not in repo_url:
+            raise ValueError(f"Only GitHub URLs are supported: {repo_url}")
+
+        # Extract owner/repo, handle tree/branch in URL
+        if 'tree' in url_parts:
+            tree_idx = url_parts.index('tree')
+            owner = url_parts[tree_idx - 2]
+            repo = url_parts[tree_idx - 1]
+            revision = url_parts[tree_idx + 1]
+        else:
+            owner = url_parts[-2]
+            repo = url_parts[-1]
+
+        raw_url = (f"https://raw.githubusercontent.com/"
+                   f"{owner}/{repo}/{revision}/nextflow_schema.json")
+
+        session = self.get_or_create_github_session()
+        response = session.get(raw_url)
+        if response.status_code != 200:
+            raise ValueError(
+                f"Failed to fetch nextflow_schema.json from {raw_url}: "
+                f"{response.status_code}")
+
+        return response.json()
+
+    def get_nextflow_parameters(
+            self, pipeline: str) -> Dict[str, Dict[str, Any]]:
+        """Retrieve parameters for a Nextflow pipeline from its schema.
+
+        Fetches and parses the nextflow_schema.json file from the
+        pipeline's GitHub repository.
+
+        Args:
+            pipeline (str): The pipeline name.
+
+        Returns:
+            Dict[str, Dict[str, Any]]: A dictionary mapping parameter
+                names to their metadata (type, default, description,
+                optional, group, enum, items_schema).
+        """
+        schema = self.pull_nextflow_schema(pipeline)
+        params = {}
+        for group_name, group_def in schema.get("$defs", {}).items():
+            if not isinstance(group_def, dict):
+                continue
+            group_title = group_def.get("title", group_name)
+            required_fields = group_def.get("required", [])
+            for prop_name, prop_schema in group_def.get(
+                    "properties", {}).items():
+                params[prop_name] = {
+                    "name": prop_name,
+                    "type": prop_schema.get("type", "string"),
+                    "default": prop_schema.get("default"),
+                    "description": prop_schema.get("description", ""),
+                    "optional": prop_name not in required_fields,
+                    "group": group_title,
+                    "enum": prop_schema.get("enum"),
+                    "items_schema": prop_schema.get("items"),
+                }
+        return params
+
+    def get_nextflow_command(
+            self, pipeline: str, **kwargs
+    ) -> Tuple[str, Dict]:
+        """Generate sbatch command wrapping a Nextflow pipeline run.
+
+        Args:
+            pipeline (str): The pipeline name.
+            **kwargs: Pipeline parameters to pass as CLI arguments.
+
+        Returns:
+            Tuple[str, Dict]: The sbatch command string and
+                environment variables dict.
+        """
+        pipeline_key = pipeline.lower()
+        pipeline_path = self.nextflow_pipelines.get(pipeline_key, pipeline_key)
+        entry = self.nextflow_entries.get(pipeline_key, "main.nf")
+        profile = self.nextflow_default_profile
+        job_params = self.nextflow_job_params.get(pipeline_key, [])
+
+        full_pipeline_path = (
+            f"{self.nextflow_pipelines_path}/{pipeline_path}"
+            if self.nextflow_pipelines_path else pipeline_path)
+
+        # Separate simple params from complex params (list/dict)
+        simple_params = []
+        complex_params = {}
+        for k, v in kwargs.items():
+            if isinstance(v, (list, dict)):
+                complex_params[k] = v
+            elif isinstance(v, bool):
+                simple_params.append(
+                    f"--{k} {str(v).lower()}")
+            else:
+                simple_params.append(f"--{k} {v}")
+        nf_params_str = " ".join(simple_params)
+
+        sbatch_env = {
+            "NF_PIPELINE": f"\"{pipeline}\"",
+            "NF_PIPELINE_PATH": f"\"{full_pipeline_path}\"",
+            "NF_ENTRY": f"\"{entry}\"",
+            "NF_PROFILE": f"\"{profile}\"",
+            "NF_WORK_PATH": f"\"{self.nextflow_work_path}\"" if self.nextflow_work_path else "\"./work\"",
+            "NF_MODULE": f"\"{self.nextflow_module}\"" if self.nextflow_module else "\"nextflow\"",
+            "NF_PARAMS": f"\"{nf_params_str}\"" if nf_params_str else "",
+        }
+
+        # If complex params exist, they'll be written as params.json
+        # and referenced via NF_PARAMS_FILE
+        if complex_params:
+            sbatch_env["NF_PARAMS_FILE"] = (
+                f"\"{full_pipeline_path}/params_{pipeline_key}.json\"")
+
+        job_param_str = "".join(job_params)
+        sbatch_cmd = (
+            f"sbatch{job_param_str} --output=omero-%j.log "
+            f"\"{self.slurm_script_path}/nextflow_job_template.sh\"")
+
+        return sbatch_cmd, sbatch_env, complex_params
+
+    def run_nextflow_pipeline(
+            self, pipeline_name: str,
+            wf_id: Optional[UUID] = None,
+            omero_session_key: str = None,
+            omero_host: str = None,
+            omero_port: int = None,
+            **kwargs
+    ) -> Tuple[Result, int, UUID, UUID]:
+        """Submit a Nextflow pipeline via a wrapper sbatch job.
+
+        This wraps a Nextflow pipeline inside a Slurm job so that
+        BIOMERO can track it via sacct. Nextflow itself submits
+        sub-jobs to Slurm for each process.
+
+        Args:
+            pipeline_name (str): Name of the Nextflow pipeline.
+            wf_id (UUID, optional): Workflow ID for tracking.
+            omero_session_key (str, optional): OMERO session key for
+                credential injection.
+            omero_host (str, optional): OMERO server hostname.
+            omero_port (int, optional): OMERO server port.
+            **kwargs: Pipeline parameters.
+
+        Returns:
+            Tuple[Result, int, UUID, UUID]: Result, Slurm job ID,
+                workflow ID, and task ID.
+        """
+        revision = self.nextflow_revisions.get(
+            pipeline_name.lower(), "main")
+
+        if not wf_id:
+            wf_id = self.workflowTracker.initiate_workflow(
+                pipeline_name, revision, -1, -1)
+
+        task_id = self.workflowTracker.add_task_to_workflow(
+            wf_id, pipeline_name, revision,
+            f"nextflow:{pipeline_name}", kwargs)
+        logger.debug(
+            f"Added Nextflow task {task_id} to workflow {wf_id}")
+
+        # Build the command
+        sbatch_cmd, sbatch_env, complex_params = \
+            self.get_nextflow_command(pipeline_name, **kwargs)
+
+        pipeline_key = pipeline_name.lower()
+        pipeline_path = self.nextflow_pipelines.get(
+            pipeline_key, pipeline_key)
+        full_pipeline_path = (
+            f"{self.nextflow_pipelines_path}/{pipeline_path}"
+            if self.nextflow_pipelines_path else pipeline_path)
+
+        # Write complex params as JSON file if needed
+        if complex_params:
+            import json
+            params_json = json.dumps(complex_params, indent=2)
+            params_file = f"params_{pipeline_key}.json"
+            remote_path = f"{full_pipeline_path}/{params_file}"
+            self.put(local=io.StringIO(params_json),
+                     remote=remote_path)
+            logger.info(f"Wrote params file to {remote_path}")
+
+        # Write OMERO credentials config if session key provided
+        if omero_session_key:
+            creds_content = (
+                f"params.omero_credentials = [\n"
+                f"    session_key: '{omero_session_key}',\n"
+                f"    host: '{omero_host}',\n"
+                f"    port: {omero_port}\n"
+                f"]\n")
+            creds_path = f"{full_pipeline_path}/config/credentials.config"
+            # Ensure config directory exists
+            self.run_commands(
+                [f"mkdir -p \"{full_pipeline_path}/config\""])
+            self.put(local=io.StringIO(creds_content),
+                     remote=creds_path)
+            logger.info("Wrote OMERO credentials config")
+
+        print(f"Running Nextflow pipeline {pipeline_name} on Slurm: "
+              f"{sbatch_cmd}")
+        logger.info(
+            f"Running Nextflow pipeline {pipeline_name} on Slurm")
+        res = self.run_commands([sbatch_cmd], sbatch_env)
+        slurm_job_id = self.extract_job_id(res)
+
+        if task_id:
+            self.workflowTracker.start_task(task_id)
+            self.workflowTracker.add_job_id(task_id, slurm_job_id)
+            self.workflowTracker.add_result(task_id, res)
+
+        return res, slurm_job_id, wf_id, task_id
+
+    def setup_nextflow_pipelines(self):
+        """Clone or update Nextflow pipeline repos on the Slurm cluster.
+
+        For each configured pipeline, clones the repository if it
+        doesn't exist, or pulls the latest changes if it does.
+        """
+        if not self.nextflow_pipelines_path:
+            logger.warning("No nextflow_pipelines_path configured")
+            return
+
+        # Create base directory
+        self.run_commands(
+            [f"mkdir -p \"{self.nextflow_pipelines_path}\""])
+
+        if self.nextflow_work_path:
+            self.run_commands(
+                [f"mkdir -p \"{self.nextflow_work_path}\""])
+
+        for name, path in self.nextflow_pipelines.items():
+            repo_url = self.nextflow_repos.get(name)
+            if not repo_url:
+                logger.warning(
+                    f"No repo URL for Nextflow pipeline '{name}'")
+                continue
+
+            revision = self.nextflow_revisions.get(name, "main")
+            full_path = f"{self.nextflow_pipelines_path}/{path}"
+
+            # Parse repo URL (remove /tree/branch if present)
+            clean_url = repo_url
+            if '/tree/' in clean_url:
+                clean_url = clean_url.split('/tree/')[0]
+            if not clean_url.endswith('.git'):
+                clean_url = clean_url + '.git'
+
+            # Clone or pull
+            clone_cmd = (
+                f"if [ -d \"{full_path}/.git\" ]; then "
+                f"cd \"{full_path}\" && git fetch && "
+                f"git checkout {revision} && git pull; "
+                f"else git clone -b {revision} {clean_url} "
+                f"\"{full_path}\"; fi")
+            try:
+                r = self.run_commands([clone_cmd])
+                if r.ok:
+                    logger.info(
+                        f"Setup Nextflow pipeline '{name}' at "
+                        f"{full_path}")
+                else:
+                    logger.error(
+                        f"Failed to setup pipeline '{name}': "
+                        f"{r.stderr}")
+            except Exception as e:
+                logger.error(
+                    f"Error setting up pipeline '{name}': {e}")
 
     def get_cellpose_command(self, image_version: str,
                              input_data: str,

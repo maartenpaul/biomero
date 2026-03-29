@@ -143,6 +143,17 @@ class transfer:
     FOLDER_DEFAULT = 'SLURM_IMAGES_'
     
 
+class nextflow_workflow:
+    # ------------------------------------------------------------
+    # Nextflow pipeline constants
+    # ------------------------------------------------------------
+    RUN_NF_SCRIPT = "SLURM_Run_Nextflow_Pipeline.py"
+    PIPELINE_NAME = "Pipeline_Name"
+    OMERO_SESSION_KEY = "OMERO_Session_Key"
+    OMERO_HOST = "OMERO_Host"
+    OMERO_PORT = "OMERO_Port"
+
+
 class workflow_status:
     INITIALIZING = "INITIALIZING"
     TRANSFERRING = "TRANSFERRING"
